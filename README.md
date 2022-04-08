@@ -48,7 +48,7 @@ The views can be installed in any schema there is 4 inputs that are needed when 
 
 ``` bash
 cd postgres-dba-utils
-LT-14739:postgres-dba-utils tonym$ ./dbautils_deployment.sh localhost postgres postgres password123
+$$ postgres-dba-utils $ ./dbautils_deployment.sh localhost postgres postgres password123
 Fri  8 Apr 2022 15:11:02 BST DBA-Utils install starting on host - localhost
 Fri  8 Apr 2022 15:11:02 BST Logfile for run /tmp/dbautils_deployment_20220408_151102.log
 Fri  8 Apr 2022 15:11:02 BST DBA-Utils deployment complete
@@ -63,7 +63,7 @@ Fri  8 Apr 2022 15:11:02 BST Clearing down old logfiles
 Now you have the views installed you can connect to the instance and run the dbautils function that will show you all the views you can run.
 
 ``` bash
-LT-14739:postgres-dba-utils tonym$ psql -h localhost -U postgres
+$$ :postgres-dba-utils $ psql -h localhost -U postgres
 psql (12.1, server 12.5 (Debian 12.5-1.pgdg100+1))
 Type "help" for help.
 
