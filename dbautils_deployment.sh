@@ -1,149 +1,41 @@
-#/bin/bash
-#$Id:
+#!/bin/bash
 #File: dbautils_deployment.sh
 #Desc:
 #
 # Amendment History:
 # Date:      Who:           Desc:
-# 19/09/19   T.Mullen       Initial;
-# 03/03/25   D.Chapman      Updated with new views and support for more local databases
+# 08/04/22   T.Mullen       Initial;
+# 03/03/25   D.Chapman      Updated views;
 
-notify() {
-  vTYPE=$1
-  vMSG=$2
-  vTIME=$(date "+%F %T")
 
-  echo "${vTIME} [${vTYPE}]: ${vMSG}" | tee -a $LOG
-  if [ $vTYPE == "ERROR" ]; then
-    echo "${vTIME} [${vTYPE}]: EXITING..." | tee -a $LOG
-    echo ""
-    exit 1
-  elif [ $vTYPE == "ERRORLOOP" ]; then
-    # Error inside a loop, so exits the loop, not the program
-    echo "${vTIME} [${vTYPE}]: Skipping this iteration" | tee -a $LOG
-    echo ""
-    continue
-  fi
-}
+LOGS=/tmp
+LOG=$LOGS/$(basename $0 .sh)_$(date +%Y%m%d_%H%M%S).log
+export HOST=$1
+export DBNAME=$2
+export SCHEMA=$3
+export PASS=$4
 
-check_exit() {
-  # Purpose: Check last command's return code and if returned error, then write error message and leaves the program. It must be right after the command you want to test
-  # Parameters: [IN: message type (can be NOTE or ERROR. If ERROR, will stop execution and leave the program); OUT: Formatted message ]
-  # Example: check_exit $?
-  if [ $1 != 0 ]; then
-    notify ERROR "Unexpected error occurred with the last statement. I can't continue..."
-  fi
-}
-
-check_exit_loop() {
-  # Purpose: Check last command's return code and if returned error, then write error message and leaves the program. It must be right after the command you want to test
-  # Parameters: [IN: message type (can be NOTE or ERROR. If ERROR, will stop execution and leave the program); OUT: Formatted message ]
-  # Example: check_exit $?
-  sleep 3
-  if [ $1 != 0 ]; then
-    notify ERRORLOOP "Unexpected error occurred with the last statement, on the last iteration..."
-  fi
-}
-
-#aws='/var/lib/pgsql/awscli/bin/aws-cli'
-vExclude="nomon|clone|-rr|nightly" # -rr is to skip read-replicas
-LOGDIR="/tmp"
-DATE=$(date +%Y%m%d%H%M%S)
-RUNID=$(
-  tr </dev/urandom -dc '123456789' | head -c5
-  echo ""
-)
-
-if [ $# -lt 1 ]; then
-  echo "Usage: $0  aws-profile [instance-name]"
+if [ $# -lt 4 ]; then
+  echo "Usage: $0  hostname, dbname, schema, password"
   exit 1
-elif [ $# -eq 1 ]; then
-  # Apply to all instances
-  vAWSProfile=$1
-  LOG="${LOGDIR}/dbautils_deployment-${vAWSProfile}-${RUNID}-${DATE}.log"
-  INST_LIST="${LOGDIR}/list_RDS_instances_deploy-${vAWSProfile}-${RUNID}-${DATE}.log"
-  touch ${INST_LIST}
-  DB_LIST="${LOGDIR}/db_list-${vAWSProfile}-${RUNID}-${DATE}.log"
-  touch ${DB_LIST}
-
-  aws rds describe-db-instances --query 'DBInstances[?Engine==`'postgres'` && DBInstanceStatus!=`stopped`].[DBInstanceIdentifier]' --output text --profile ${vAWSProfile} | grep -ivE "${vExclude}" > ${INST_LIST}
-  check_exit $?
-  sleep 1
-elif [ $# -eq 2 ]; then
-  # Apply only for this instance
-  vAWSProfile=$1
-  vInstanceName=$2
-  LOG="${LOGDIR}/dbautils_deployment-${vAWSProfile}-${RUNID}-${DATE}.log"
-  INST_LIST="${LOGDIR}/list_RDS_instances_deploy-${vAWSProfile}-${RUNID}-${DATE}.log"
-  touch ${INST_LIST}
-  DB_LIST="${LOGDIR}/db_list-${vAWSProfile}-${RUNID}-${DATE}.log"
-  touch ${DB_LIST}
-
-  aws rds describe-db-instances --db-instance-identifier ${vInstanceName} --query 'DBInstances[?Engine==`'postgres'` && DBInstanceStatus!=`stopped`].[DBInstanceIdentifier]' --output text --profile ${vAWSProfile} | grep -ivE "${vExclude}" > ${INST_LIST}
-  check_exit $?
-  sleep 1
 fi
 
-if [ ! -d "${LOGDIR}" ]; then
-  mkdir ${LOGDIR}
-  echo "$(date) Created logfile directory ${LOGDIR}" | tee -a $LOG
+if [ ! -d "$LOGS" ]; then
+  mkdir $LOGS
+  echo "$(date) Created logfile directory $LOGS" | tee -a $LOG
 fi
 
-notify NOTE "Logfile created: ${LOG}"
-notify NOTE "DBAUTILS deployment will be attempted on the following instances:"
-cat ${INST_LIST} | tee -a ${LOG}
+
+echo "$(date) DBA-Utils install starting on host - $HOST" | tee -a $LOG
+echo "$(date) Logfile for run $LOG" | tee -a $LOG
 
 #Get variables for each instance.
-for line in $(cat ${INST_LIST} | awk '{print $1}'); do
-  tempInstData=$(aws rds describe-db-instances --db-instance-identifier ${line} --output text --query "DBInstances[*].[Endpoint.Address,DBInstanceIdentifier,DBInstanceStatus,EngineVersion]" --profile ${vAWSProfile} 2>/dev/null)
-  export host=$(echo $tempInstData|awk '{print $1}')
-  export dbidentifer=$(echo $tempInstData|awk '{print $2}')
-  export dbstatus=$(echo $tempInstData|awk '{print $3}')
-  export dbversion=$(echo $tempInstData|awk '{print $4}')
-  export port=5432
-  export user=$(aws rds describe-db-instances --db-instance-identifier ${dbidentifer} --profile ${vAWSProfile} --query 'DBInstances[*].MasterUsername' --output text)
+PSQL="psql -a -b -e --host=${HOST} --dbname=${DBNAME} --username=${SCHEMA}"
+export PGPASSWORD=$PASS
+$PSQL <<EOF >>$LOG 2>&1
+CREATE SCHEMA IF NOT EXISTS ${SCHEMA};
 
-  notify NOTE "=== Deploying DBAUTILS on: ${host} ==="
-
-  # Will attempt to fetch the password 5 times. If it can't, then leaves the loop and continue on the next...
-  for times in $(seq 1 5); do
-    export pass=$(aws ssm get-parameter --name /dba/${vAWSProfile}/${dbidentifer}/${user} --with-decryption --output text --query Parameter.Value --profile ${vAWSProfile})
-
-    # Extra layer of validation for the password as it is the part which is failing the most
-    if [ $(echo ${pass} | wc -w) -le 0 ]; then
-      if [ $times -eq 5 ]; then
-        notify ERRORLOOP "   ! The password could not be retrieved after ${times} attempts, so can't continue with the current iteration."
-      fi
-      notify NOTE "   ! Attempt #${times} to retrieve password..."
-      sleep 10
-    else
-      export PGPASSWORD=${pass}
-      break 1
-    fi
-  done
-
-notify NOTE "Looping through all local databases and setting up dbutils in each one"
-# loop through local databases setting up dbautils on each one
-    psql -a -b -t --host=${host} --dbname=postgres --username=${user} << EOF > ${DB_LIST}
-        select datname from pg_database where datname not in ('rdsadmin','template0','template1');
-EOF
-
-  sed '$d' ${DB_LIST} | while read dbname
-    do
-    vLocalLog="${LOGDIR}/${dbidentifer}-${dbname}-${RUNID}-${DATE}.log"
-    echo "==============================================================================" >>${LOG}
-    notify NOTE "  - ${dbidentifer}:${port}/${dbname}"
-
-    # Test if database accessible
-    psql -q --host=${host} --dbname=${dbname} --username=${user} -c '\c' >>/dev/null 2>&1
-    if [ $? -ne 0 ]; then
-      notify NOTE "   ! Skipping deployment on ${host}:${port}/${dbname} due to connection issue"
-    else
-      PSQL="psql -a -b --host=${host} --dbname=${dbname} --username=${user}"
-      $PSQL <<EOF 1>${vLocalLog} 2>&1
-CREATE SCHEMA IF NOT EXISTS dbadmin;
-
-DROP FUNCTION IF EXISTS dbadmin.dbautils;
+DROP FUNCTION IF EXISTS ${SCHEMA}.dbautils;
 CREATE OR REPLACE FUNCTION dbadmin.dbautils()
   RETURNS void
 AS
@@ -675,33 +567,19 @@ BEGIN
 END \$\$
 EOF
 
-      # Saving each individual log to the main logfile
-      cat ${vLocalLog} &>>${LOG}
-
-      # Checking for error on each logfile individually. Will delete logs if NO errors found.
-      vErrorCount=$(grep -iEc "error|refused|fatal" ${vLocalLog} | xargs)
-      if [ ${vErrorCount} -gt 0 ]; then
-        notify WARNING "Found ${vErrorCount} error on ${vLocalLog} ."
-        grep -iE -B1 "error|refused|fatal" ${vLocalLog}
-      else
-        rm -f ${vLocalLog}
-      fi
-
-      sleep 0.1
-    fi
-  done
-done
 
 #Check for errors
-chk_errors=$(cat ${LOG} | grep -E "ERROR|error|refused" | wc -l)
+chk_errors=$(cat $LOG | grep -E "ERROR|error|refused" | wc -l)
 if [ $chk_errors -lt 1 ]; then
-  notify NOTE "=== DBAUTILS deployment complete ==="
+  echo "$(date) DBA-Utils deployment complete"
+  echo "$(date) Connect to database - psql -h ${HOST} -U ${SCHEMA} --dbname ${DBNAME}"
+  echo "$(date) Run the follwing sql to see all the views - select * from dbautils();"
+PSQL="psql -a -b -e --host=${HOST} --dbname=${DBNAME} --username=${SCHEMA}"
 else
-  notify ERROR "****ERROR - Problems with the deployment.  Please check $LOG"
+  echo "$(date)****ERROR - Problems with the deployment.  Please check $LOG"
   exit 1
 fi
 
-notify NOTE "Clearing down old logfiles"
-find ${LOGDIR} -name "$(basename $0 .sh)[-_]*" -mtime +3 -exec rm -vf {} \; >>$LOG
+echo "$(date) Clearing down old logfiles"
+find $LOGS -name "$(basename $0 .sh)[-_]*" -mtime +7 -exec rm -vf {} \; >>$LOG
 rm -f ${INST_LIST}
-rm -f ${DB_LIST}
